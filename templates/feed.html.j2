@@ -11,7 +11,7 @@
   <div class="card shadow-sm">
     <div class="card-body">
       <h5 class="card-title">Create a new post</h5>
-      <form action="{{ url_for('add_post') }}" method="POST">
+      <form action="{{ url_for('add_post') }}" method="POST" onsubmit="handlePostSubmit(event)">
         <div class="mb-3">
           <textarea class="form-control" name="content" rows="3" placeholder="What's on your mind, {{ session.get('username') }}?" required></textarea>
         </div>
@@ -42,39 +42,65 @@
     <a href="{{ url_for('feed', sort=current_sort, show='all') }}" class="btn {% if current_show == 'all' %}btn-primary{% else %}btn-light{% endif %}">All</a>
     <a href="{{ url_for('feed', sort=current_sort, show='following') }}" class="btn {% if current_show == 'following' %}btn-primary{% else %}btn-light{% endif %}">Following</a>
   </div>
-   {% endif %}
-
-  
+   {% endif %} 
 </div>
 
 <div class="col-md-8 mx-auto">
   {% for entry in posts %}
   <div class="card mb-4" id="post-{{ entry.post.id }}">
     <div class="card-body">
-      <div class="d-flex justify-content-between align-items-center">
-        <h3 class="card-title mb-0">
-          {% if entry.followed_poster %}
-          <a href="/u/{{ entry.post.user_id }}">{{ user_display(entry.post.username) }}<span class="text-success p-1" data-toggle="tooltip" data-placement="top" title="You are following this user"> ✓ </span>
-</a>
-          {% else %}
-          <a href="/u/{{ entry.post.user_id }}">{{ user_display(entry.post.username) }} </a>
-          {% endif %}
-        </h3>
-
-        
-        {% if session.get('user_id') == entry.post.user_id %}
-        <div class="d-flex align-items-center">
-            <small class="text-muted me-3">{{ entry.post.created_at|datetimeformat }}</small>
-            <form action="{{ url_for('delete_post', post_id=entry.post.id) }}" method="POST" onsubmit="return confirm('Are you sure you want to delete this post?');">
-                <button type="submit" class="btn btn-danger" title="Delete Post">
-                   delete
-                </button>
-            </form>
+      
+      <!-- NEW CODE: Engagement Badge for Design Claim 1 -->
+      {% if entry.needs_engagement %}
+        <div style="background-color: #ff9800; color: #fff; padding: 4px 8px; border-radius: 4px; font-size: 0.8em; margin-bottom: 15px; display: inline-block; font-weight: bold;">
+          🎯 Needed Contribution: Be the first to engage!
         </div>
-        {% else %}
-        <small class="text-muted">{{ entry.post.created_at|datetimeformat }}</small>
-        {% endif %}
+      {% endif %}
+
+      <!-- NEW CODE: Newcomer Banner for Chapter 5 Design Claim -->
+      {% if entry.post.is_newcomer %}
+      <div style="background-color: #e3f2fd; color: #0d47a1; padding: 8px; border-radius: 5px; margin-bottom: 15px; font-size: 0.9em;">
+          👋 <strong>Newcomer:</strong> This user recently joined. Please be kind and constructive in your replies!
       </div>
+      {% endif %}
+
+      <div class="d-flex justify-content-between align-items-center">
+  <!-- Left: Username -->
+
+  <h3 class="card-title mb-0">
+    {% if entry.followed_poster %}
+    <a href="/u/{{ entry.post.user_id }}">{{ user_display(entry.post.username) }}</a>
+    {% else %}
+    <a href="/u/{{ entry.post.user_id }}">{{ user_display(entry.post.username) }}</a>
+    {% endif %}
+
+    <!-- Admin Risk Badge -->
+    {% if is_admin %}
+      <span class="badge 
+        {% if entry.post.risk_label == 'HIGH' %}bg-danger
+        {% elif entry.post.risk_label == 'MEDIUM' %}bg-warning text-dark
+        {% elif entry.post.risk_label == 'LOW' %}bg-info text-dark
+        {% else %}bg-secondary{% endif %} ms-2" style="font-size: 0.75rem;">
+        Risk: {{ entry.post.risk_label or 'NONE' }} ({{ entry.post.risk_score or 0.0 }})
+      </span>
+    {% endif %}
+  </h3>
+
+  <!-- Right: Timestamp + Action Button (Delete or Report) -->
+  <div class="d-flex align-items-center">
+    <small class="text-muted me-3">{{ entry.post.created_at|datetimeformat }}</small>
+    
+    {% if session.get('user_id') == entry.post.user_id %}
+    <form action="{{ url_for('delete_post', post_id=entry.post.id) }}" method="POST" class="d-inline" onsubmit="return confirm('Are you sure you want to delete this post?');">
+      <button type="submit" class="btn btn-danger btn-sm py-0 px-2" style="font-size: 0.8rem;" title="Delete Post">delete</button>
+    </form>
+    {% else %}
+    <form action="{{ url_for('report_post', post_id=entry.post.id) }}" method="POST" class="d-inline">
+      <button type="submit" class="btn btn-outline-danger btn-sm py-0 px-2" style="font-size: 0.8rem;">🚩 Report</button>
+    </form>
+    {% endif %}
+  </div>
+</div>
       
       <p class="mt-2">{{ entry.post.content }}</p>
 
@@ -200,4 +226,42 @@
       Next &raquo;
     </a>
   </div>
+
+<!-- DESIGN CLAIM 39: Pre-post warning script -->
+<script>
+async function handlePostSubmit(event) {
+    // Stop the form from submitting immediately
+    event.preventDefault(); 
+    
+    const form = event.target;
+    // Find the textarea inside the form
+    const contentInput = form.querySelector('textarea[name="content"]');
+    
+    if (!contentInput || contentInput.value.trim() === "") {
+        form.submit();
+        return;
+    }
+
+    // Ask the backend to check the score silently
+    const response = await fetch('/api/check_content', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content: contentInput.value })
+    });
+    
+    const data = await response.json();
+    
+    // If the score is higher than 0, show the warning
+    if (data.score > 0) {
+        const proceed = confirm("⚠ Warning: Your post contains language that violates community guidelines. It will be censored or removed, and your account risk score will increase.\n\nAre you sure you want to post this?");
+        if (proceed) {
+            form.submit(); // Submit if they click OK
+        }
+        // If they click Cancel, the form simply doesn't submit, giving them a chance to edit.
+    } else {
+        form.submit(); // Submit normally if the score is 0
+    }
+}
+</script>
+
 {% endblock %}

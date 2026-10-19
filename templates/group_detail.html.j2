@@ -1,0 +1,79 @@
+{% extends "base.html.j2" %}
+{% block content %}
+<div class="col-md-8 mx-auto">
+  <div class="mb-3">
+    <a href="{{ url_for('groups') }}" class="btn btn-sm btn-light">&laquo; Back to Groups</a>
+  </div>
+
+<div class="d-flex justify-content-between align-items-center border-bottom pb-2">
+    <h2 class="mb-0">{{ group.name }}</h2>
+    
+    <div class="d-flex align-items-center">
+      <!-- NEW CODE: Delete Group Button (Only visible to the creator) -->
+      {% if session.user_id == group.creator_id %}
+        <form action="{{ url_for('delete_group', group_id=group.id) }}" method="POST" class="m-0 me-3" onsubmit="return confirm('Are you sure you want to permanently delete this group?');">
+          <button type="submit" class="btn btn-danger btn-sm">Delete Group</button>
+        </form>
+      {% endif %}
+
+      <!-- Existing Join/Leave Button Logic -->
+      {% if not is_member %}
+        <form action="{{ url_for('add_group_member', group_id=group.id) }}" method="POST" class="m-0">
+          <input type="hidden" name="user_id" value="{{ session.user_id }}">
+          <button type="submit" class="btn btn-success">Join Group</button>
+        </form>
+      {% else %}
+        <span class="badge bg-success fs-6 me-3">✓ You are a member</span>
+        <form action="{{ url_for('leave_group', group_id=group.id) }}" method="POST" class="m-0" onsubmit="return confirm('Are you sure you want to leave this group?');">
+          <button type="submit" class="btn btn-outline-danger btn-sm">Leave</button>
+        </form>
+      {% endif %}
+    </div>
+  </div>
+  
+  <p class="text-muted mt-2">Group Interest Keyword: <strong>{{ group.keyword }}</strong></p>
+
+  <div class="row mt-4">
+    <!-- Current Members -->
+    <div class="col-md-6">
+      <div class="card shadow-sm">
+        <div class="card-header bg-white">
+          <h5 class="mb-0">Current Members</h5>
+        </div>
+        <ul class="list-group list-group-flush">
+          {% for member in members %}
+            <li class="list-group-item">{{ member.username }}</li>
+          {% else %}
+            <li class="list-group-item text-muted">No members found.</li>
+          {% endfor %}
+        </ul>
+      </div>
+    </div>
+
+    <!-- Recommendations Engine (Design Claim 32) -->
+    <div class="col-md-6">
+      <div class="card border-primary shadow-sm">
+        <div class="card-header bg-primary text-white">
+          <h5 class="mb-0">Suggested Members</h5>
+        </div>
+        <div class="card-body py-2 bg-light">
+          <small class="text-muted">These users have posted about "<strong>{{ group.keyword }}</strong>". Invite them!</small>
+        </div>
+        <ul class="list-group list-group-flush">
+          {% for user in suggestions %}
+            <li class="list-group-item d-flex justify-content-between align-items-center">
+              {{ user.username }}
+              <form action="{{ url_for('add_group_member', group_id=group.id) }}" method="POST">
+                <input type="hidden" name="user_id" value="{{ user.id }}">
+                <button type="submit" class="btn btn-sm btn-outline-primary">Add to Group</button>
+              </form>
+            </li>
+          {% else %}
+            <li class="list-group-item text-muted">No new suggestions right now.</li>
+          {% endfor %}
+        </ul>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

@@ -35,6 +35,27 @@
     </li>
 </ul>
 
+</ul>
+
+    <!-- Risk Level Filter Bar -->
+    <div class="d-flex justify-content-between align-items-center mb-3">
+      <form method="GET" action="{{ url_for('admin_dashboard') }}" class="d-flex align-items-center gap-2">
+        <input type="hidden" name="tab" value="{{ current_tab }}">
+        
+        <label for="risk_filter" class="form-label mb-0 fw-bold small text-muted">Filter by Risk:</label>
+        <select name="risk_filter" id="risk_filter" class="form-select form-select-sm" onchange="this.form.submit()">
+          <option value="ALL" {% if risk_filter == 'ALL' %}selected{% endif %}>All Levels</option>
+          <option value="HIGH" {% if risk_filter == 'HIGH' %}selected{% endif %}>High Risk (5.0)</option>
+          <option value="MEDIUM" {% if risk_filter == 'MEDIUM' %}selected{% endif %}>Medium Risk (3.0)</option>
+          <option value="LOW" {% if risk_filter == 'LOW' %}selected{% endif %}>Low Risk (1.0)</option>
+          <option value="NONE" {% if risk_filter == 'NONE' %}selected{% endif %}>None (0.0)</option>
+        </select>
+      </form>
+    </div>
+
+    <!-- Tab Content -->
+    <div class="tab-content" id="adminTabContent">
+
 <!-- Tab Content -->
 <div class="tab-content" id="adminTabContent">
 

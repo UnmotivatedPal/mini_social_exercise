@@ -17,6 +17,35 @@
           </p>
           <p class="card-text">{{ user.profile or "No profile information provided." }}</p>
 
+  <!-- NEW CODE: Activity Dashboard (Design Claim 13) -->
+          {% if session.user_id == user.id %}
+          <div class="card mt-4 mb-3 border-primary shadow-sm">
+            <div class="card-header bg-primary text-white py-2">
+              <h6 class="mb-0">📈 Your Activity Goal</h6>
+            </div>
+            <div class="card-body py-2">
+              <p class="mb-1 small"><strong>Your Posts:</strong> {{ user_post_count }} | <strong>Platform Average:</strong> {{ platform_avg }}</p>
+              <p class="mb-2 small">
+                <strong>Current Challenge:</strong> Reach <strong>{{ target_goal }}</strong> posts! 
+                {% if user_post_count >= platform_avg %}
+                  (You are above average, keep going!)
+                {% else %}
+                  (Catch up to the community!)
+                {% endif %}
+              </p>
+              
+              <!-- Progress Bar -->
+              {% set progress_percent = (user_post_count / target_goal * 100) | round | int %}
+              <div class="progress" style="height: 15px;">
+                <div class="progress-bar bg-success" role="progressbar" style="width: {{ progress_percent }}%;" aria-valuenow="{{ progress_percent }}" aria-valuemin="0" aria-valuemax="100">
+                  {{ progress_percent }}%
+                </div>
+              </div>
+            </div>
+          </div>
+          {% endif %}
+          <!-- END NEW CODE -->
+
          {% if session.user_id and session.user_id != user.id %}
             <div class="my-3">
               {# The logic is now a simple boolean check #}

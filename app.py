@@ -139,15 +139,31 @@ def feed():
     elif sort == 'recommended':
         posts = recommend(current_user_id, show == 'following' and current_user_id)
     else:  # Default sort is 'new'
-        query = f"""
-            SELECT p.id, p.content, p.created_at, u.username, u.id as user_id
-            FROM posts p
-            JOIN users u ON p.user_id = u.id
-            {where_clause}
-            ORDER BY p.created_at DESC
-            LIMIT ? OFFSET ?
-        """
-        final_params = params + list(pagination_params)
+        if current_user_id:
+            query = f"""
+                SELECT p.id, p.content, p.created_at, u.username, u.id as user_id,
+                       (CASE WHEN (
+                           EXISTS (SELECT 1 FROM reactions r WHERE r.post_id = p.id AND r.user_id = ?)
+                           OR
+                           EXISTS (SELECT 1 FROM comments c WHERE c.post_id = p.id AND c.user_id = ?)
+                       ) THEN 1 ELSE 0 END) as has_engaged
+                FROM posts p
+                JOIN users u ON p.user_id = u.id
+                {where_clause}
+                ORDER BY has_engaged ASC, p.created_at DESC
+                LIMIT ? OFFSET ?
+            """
+            final_params = [current_user_id, current_user_id] + params + list(pagination_params)
+        else:
+            query = f"""
+                SELECT p.id, p.content, p.created_at, u.username, u.id as user_id, 0 as has_engaged
+                FROM posts p
+                JOIN users u ON p.user_id = u.id
+                {where_clause}
+                ORDER BY p.created_at DESC
+                LIMIT ? OFFSET ?
+            """
+            final_params = params + list(pagination_params)
         posts = query_db(query, final_params)
 
     posts_data = []
@@ -176,19 +192,150 @@ def feed():
 
         reactions = query_db('SELECT reaction_type, COUNT(*) as count FROM reactions WHERE post_id = ? GROUP BY reaction_type', (post['id'],))
         comments_raw = query_db('SELECT c.id, c.content, c.created_at, u.username, u.id as user_id FROM comments c JOIN users u ON c.user_id = u.id WHERE c.post_id = ? ORDER BY c.created_at ASC', (post['id'],))
+        
+    posts_data = []
+    for post in posts:
+        # Determine if the current user follows the poster
+        followed_poster = False
+        if current_user_id and post['user_id'] != current_user_id:
+            follow_check = query_db(
+                'SELECT 1 FROM follows WHERE follower_id = ? AND followed_id = ?',
+                (current_user_id, post['user_id']),
+                one=True
+            )
+            if follow_check:
+                followed_poster = True
+
+        # Determine if the current user reacted to this post and with what reaction
+        user_reaction = None
+        if current_user_id:
+            reaction_check = query_db(
+                'SELECT reaction_type FROM reactions WHERE user_id = ? AND post_id = ?',
+                (current_user_id, post['id']),
+                one=True
+            )
+            if reaction_check:
+                user_reaction = reaction_check['reaction_type']
+
+        reactions = query_db('SELECT reaction_type, COUNT(*) as count FROM reactions WHERE post_id = ? GROUP BY reaction_type', (post['id'],))
+        comments_raw = query_db('SELECT c.id, c.content, c.created_at, u.username, u.id as user_id FROM comments c JOIN users u ON c.user_id = u.id WHERE c.post_id = ? ORDER BY c.created_at ASC', (post['id'],))
+        
         post_dict = dict(post)
+
+        # --- Calculate risk score for admin feed view ---
+        # --- Rule 2.1 & Newcomer Check ---
+        _, base_score = moderate_content(post_dict['content'])
+        final_score = base_score 
+        post_dict['is_newcomer'] = False # Default to False
+        
+        author_info = query_db('SELECT created_at FROM users WHERE id = ?', (post['user_id'],), one=True)
+        if author_info and author_info['created_at']:
+            dt = author_info['created_at']
+            if isinstance(dt, str):
+                dt = dt.replace(' ', 'T') # <--- Date fix so the multiplier actually works
+                try: dt = datetime.fromisoformat(dt)
+                except ValueError: pass
+                    
+            if isinstance(dt, datetime):
+                # Step 3: Apply age-based multiplier for posts (< 7 days)
+                if (datetime.utcnow() - dt).days < 7:
+                    final_score *= 1.5
+                    post_dict['is_newcomer'] = True # <--- Newcomer flag added here!
+        
+        if final_score >= 5.0:
+            post_dict['risk_label'] = 'HIGH'
+        elif final_score >= 3.0:
+            post_dict['risk_label'] = 'MEDIUM'
+        elif final_score >= 1.0:
+            post_dict['risk_label'] = 'LOW'
+        else:
+            post_dict['risk_label'] = 'NONE'
+        
+        post_dict['risk_score'] = round(min(5.0, final_score), 2)
+        # -----------------------------------------------
+
         post_dict['content'], _ = moderate_content(post_dict['content'])
+        
         comments_moderated = []
         for comment in comments_raw:
             comment_dict = dict(comment)
             comment_dict['content'], _ = moderate_content(comment_dict['content'])
             comments_moderated.append(comment_dict)
+            
+        # Calculate total reactions and comments across the platform
+        total_reactions_count = sum(r['count'] for r in reactions)
+        total_comments_count = len(comments_raw)
+
+        # DESIGN CLAIM 1: True if the post has zero reactions and zero comments from anyone
+        needs_engagement = True if (total_reactions_count == 0 and total_comments_count == 0) else False
+
         posts_data.append({
             'post': post_dict,
             'reactions': reactions,
             'user_reaction': user_reaction,
             'followed_poster': followed_poster,
-            'comments': comments_moderated
+            'comments': comments_moderated,
+            'needs_engagement': needs_engagement
+        })
+
+    # Determine if current user is admin
+    current_username = session.get('username', '')
+    is_admin = (current_username.lower() == 'admin' or session.get('user_id') == 1)
+
+    # 4. Render Template with Pagination Info 
+    return render_template('feed.html.j2', 
+                           posts=posts_data, 
+                           current_sort=sort,
+                           current_show=show,
+                           page=page, 
+                           per_page=POSTS_PER_PAGE, 
+                           reaction_emojis=REACTION_EMOJIS,
+                           reaction_types=REACTION_TYPES,
+                           is_admin=is_admin)
+
+# Calculate risk score for admin feed view
+    _, base_score = moderate_content(post_dict['content'])
+    final_score = base_score 
+    author_info = query_db('SELECT created_at FROM users WHERE id = ?', (post['user_id'],), one=True)
+    if author_info and author_info['created_at']:
+        dt = author_info['created_at']
+        if isinstance(dt, str):
+            try: 
+                dt = datetime.fromisoformat(dt)
+            except ValueError: 
+                pass
+        if isinstance(dt, datetime):
+            if (datetime.utcnow() - dt).days < 7:
+                final_score *= 1.5
+        
+        if final_score >= 5.0:
+            post_dict['risk_label'] = 'HIGH'
+        elif final_score >= 3.0:
+            post_dict['risk_label'] = 'MEDIUM'
+        elif final_score >= 1.0:
+            post_dict['risk_label'] = 'LOW'
+        else:
+            post_dict['risk_label'] = 'NONE'
+        
+        post_dict['risk_score'] = round(min(5.0, final_score), 2)
+
+        post_dict['content'], _ = moderate_content(post_dict['content'])
+        
+        comments_moderated = []
+        for comment in comments_raw:
+            comment_dict = dict(comment)
+            comment_dict['content'], _ = moderate_content(comment_dict['content'])
+            comments_moderated.append(comment_dict)
+            
+        # DESIGN CLAIM 1: We check if the user has engaged. If has_engaged is 0, 
+        # needs_engagement becomes True, which triggers the orange badge in HTML.
+        posts_data.append({
+            'post': post_dict,
+            'reactions': reactions,
+            'user_reaction': user_reaction,
+            'followed_poster': followed_poster,
+            'comments': comments_moderated,
+            'needs_engagement': True if current_user_id and post['has_engaged'] == 0 else False
         })
 
     #  4. Render Template with Pagination Info 
@@ -200,6 +347,16 @@ def feed():
                            per_page=POSTS_PER_PAGE, # Pass items per page
                            reaction_emojis=REACTION_EMOJIS,
                            reaction_types=REACTION_TYPES)
+
+@app.route('/report/post/<int:post_id>', methods=['POST'])
+def report_post(post_id):
+    """Allows users to report a post to moderators."""
+    if not session.get('user_id'):
+        flash('You must be logged in to report posts.', 'danger')
+        return redirect(url_for('login'))
+    
+    flash('Thank you. This post has been reported to the moderators for review.', 'success')
+    return redirect(url_for('feed'))
 
 @app.route('/posts/new', methods=['POST'])
 def add_post():
@@ -214,14 +371,14 @@ def add_post():
     # Get content from the submitted form
     content = request.form.get('content')
 
-    # Pass the user's content through the moderation function
-    moderated_content = content
+    # NEW CODE: Actually pass the content through the moderation function
+    moderated_content, score = moderate_content(content)
 
     # Basic validation to ensure post is not empty
     if moderated_content and moderated_content.strip():
         db = get_db()
         db.execute('INSERT INTO posts (user_id, content) VALUES (?, ?)',
-                   (user_id, moderated_content))
+           (user_id, content))
         db.commit()
         flash('Your post was successfully created!', 'success')
     else:
@@ -312,7 +469,21 @@ def user_profile(username):
         )
         if follow_relation:
             is_currently_following = True
-    # --
+
+    # --- DESIGN CLAIM 13: Activity Dashboard ---
+    # Count how many posts this specific user has made
+    user_post_count = len(posts)
+    
+    # Calculate platform average posts per user
+    avg_query = query_db('SELECT (SELECT COUNT(*) FROM posts) * 1.0 / (SELECT COUNT(*) FROM users) as avg_posts', one=True)
+    platform_avg = round(avg_query['avg_posts'] or 0, 1) if avg_query else 0.0
+    
+    # Set a challenging goal: either beat the platform average, or if already beating it, hit the next milestone (multiple of 5)
+    if user_post_count < platform_avg:
+        target_goal = int(platform_avg) + 1
+    else:
+        target_goal = ((user_post_count // 5) + 1) * 5
+    # ----------------------------------------------------
 
     return render_template('user_profile.html.j2', 
                            user=user, 
@@ -320,8 +491,11 @@ def user_profile(username):
                            comments=comments,
                            followers_count=followers_count, 
                            following_count=following_count,
-                           is_following=is_currently_following)
-    
+                           is_following=is_currently_following,
+                           # Pass new variables to the template
+                           user_post_count=user_post_count,
+                           platform_avg=platform_avg,
+                           target_goal=target_goal)
 
 @app.route('/u/<username>/followers')
 def user_followers(username):
@@ -674,7 +848,7 @@ def unfollow_user(user_id):
 
 @app.route('/admin')
 def admin_dashboard():
-    """Displays the admin dashboard with users, posts, and comments, sorted by risk."""
+    """Displays the admin dashboard with users, posts, and comments, sorted by risk, with optional risk filtering."""
 
     if session.get('username') != 'admin':
         flash("You do not have permission to access this page.", "danger")
@@ -692,7 +866,7 @@ def admin_dashboard():
             return "LOW", 1
         return "NONE", 0
 
-    # Get pagination and current tab parameters
+    # Get pagination, current tab, and risk filter parameters
     try:
         users_page = int(request.args.get('users_page', 1))
         posts_page = int(request.args.get('posts_page', 1))
@@ -702,18 +876,23 @@ def admin_dashboard():
         posts_page = 1
         comments_page = 1
     
-    current_tab = request.args.get('tab', 'users') # Default to 'users' tab
+    current_tab = request.args.get('tab', 'users')
+    risk_filter = request.args.get('risk_filter', 'ALL').upper()
 
     users_offset = (users_page - 1) * PAGE_SIZE
     
-    # First, get all users to calculate risk, then apply pagination in Python
-    # It's more complex to do this efficiently in SQL if risk calc is Python-side
+    # --- Users Tab Data ---
     all_users_raw = query_db('SELECT id, username, profile, created_at FROM users')
     all_users = []
     for user in all_users_raw:
         user_dict = dict(user)
         user_risk_score = user_risk_analysis(user_dict['id'])
         risk_label, risk_sort_key = get_risk_profile(user_risk_score)
+        
+        # Apply risk filter if specified
+        if risk_filter != 'ALL' and risk_label != risk_filter:
+            continue
+            
         user_dict['risk_label'] = risk_label
         user_dict['risk_sort_key'] = risk_sort_key
         user_dict['risk_score'] = min(5.0, round(user_risk_score, 2))
@@ -722,20 +901,18 @@ def admin_dashboard():
     all_users.sort(key=lambda x: x['risk_score'], reverse=True)
     total_users = len(all_users)
     users = all_users[users_offset : users_offset + PAGE_SIZE]
-    total_users_pages = (total_users + PAGE_SIZE - 1) // PAGE_SIZE
+    total_users_pages = max(1, (total_users + PAGE_SIZE - 1) // PAGE_SIZE)
 
     # --- Posts Tab Data ---
     posts_offset = (posts_page - 1) * PAGE_SIZE
-    total_posts_count = query_db('SELECT COUNT(*) as count FROM posts', one=True)['count']
-    total_posts_pages = (total_posts_count + PAGE_SIZE - 1) // PAGE_SIZE
-
-    posts_raw = query_db(f'''
+    # Fetch all posts to filter accurately by risk score since risk is computed in Python
+    posts_raw = query_db('''
         SELECT p.id, p.content, p.created_at, u.username, u.created_at as user_created_at
         FROM posts p JOIN users u ON p.user_id = u.id
-        ORDER BY p.id DESC -- Order by ID for consistent pagination before risk sort
-        LIMIT ? OFFSET ?
-    ''', (PAGE_SIZE, posts_offset))
-    posts = []
+        ORDER BY p.id DESC
+    ''')
+    
+    all_posts = []
     for post in posts_raw:
         post_dict = dict(post)
         _, base_score = moderate_content(post_dict['content'])
@@ -745,25 +922,30 @@ def admin_dashboard():
         if author_age_days < 7:
             final_score *= 1.5
         risk_label, risk_sort_key = get_risk_profile(final_score)
+        
+        # Apply risk filter if specified
+        if risk_filter != 'ALL' and risk_label != risk_filter:
+            continue
+            
         post_dict['risk_label'] = risk_label
         post_dict['risk_sort_key'] = risk_sort_key
         post_dict['risk_score'] = round(final_score, 2)
-        posts.append(post_dict)
+        all_posts.append(post_dict)
 
-    posts.sort(key=lambda x: x['risk_score'], reverse=True) # Sort after fetching and scoring
+    all_posts.sort(key=lambda x: x['risk_score'], reverse=True)
+    total_posts_count = len(all_posts)
+    posts = all_posts[posts_offset : posts_offset + PAGE_SIZE]
+    total_posts_pages = max(1, (total_posts_count + PAGE_SIZE - 1) // PAGE_SIZE)
 
     # --- Comments Tab Data ---
     comments_offset = (comments_page - 1) * PAGE_SIZE
-    total_comments_count = query_db('SELECT COUNT(*) as count FROM comments', one=True)['count']
-    total_comments_pages = (total_comments_count + PAGE_SIZE - 1) // PAGE_SIZE
-
-    comments_raw = query_db(f'''
+    comments_raw = query_db('''
         SELECT c.id, c.content, c.created_at, u.username, u.created_at as user_created_at
         FROM comments c JOIN users u ON c.user_id = u.id
-        ORDER BY c.id DESC -- Order by ID for consistent pagination before risk sort
-        LIMIT ? OFFSET ?
-    ''', (PAGE_SIZE, comments_offset))
-    comments = []
+        ORDER BY c.id DESC
+    ''')
+    
+    all_comments = []
     for comment in comments_raw:
         comment_dict = dict(comment)
         _, score = moderate_content(comment_dict['content'])
@@ -772,13 +954,20 @@ def admin_dashboard():
         if author_age_days < 7:
             score *= 1.5
         risk_label, risk_sort_key = get_risk_profile(score)
+        
+        # Apply risk filter if specified
+        if risk_filter != 'ALL' and risk_label != risk_filter:
+            continue
+            
         comment_dict['risk_label'] = risk_label
         comment_dict['risk_sort_key'] = risk_sort_key
         comment_dict['risk_score'] = round(score, 2)
-        comments.append(comment_dict)
+        all_comments.append(comment_dict)
 
-    comments.sort(key=lambda x: x['risk_score'], reverse=True) # Sort after fetching and scoring
-
+    all_comments.sort(key=lambda x: x['risk_score'], reverse=True)
+    total_comments_count = len(all_comments)
+    comments = all_comments[comments_offset : comments_offset + PAGE_SIZE]
+    total_comments_pages = max(1, (total_comments_count + PAGE_SIZE - 1) // PAGE_SIZE)
 
     return render_template('admin.html.j2', 
                            users=users, 
@@ -804,6 +993,7 @@ def admin_dashboard():
                            comments_has_prev=(comments_page > 1),
 
                            current_tab=current_tab,
+                           risk_filter=risk_filter,
                            PAGE_SIZE=PAGE_SIZE)
 
 
@@ -883,33 +1073,98 @@ def user_risk_analysis(user_id):
             password: admin
         Then, navigate to the /admin endpoint. (http://localhost:8080/admin)
     """
-    
-    score = 0
 
-    return score;
 
+    """
+    Calculates the User Risk Score based on Rule 2.2 of the specification.
+    """
+    user = query_db('SELECT intro, created_at FROM users WHERE id = ?', (user_id,), one=True)
+    if not user:
+        return 0.0
+
+    # Step 1: Profile Score
+    intro = user['intro'] if user['intro'] else ""
+    _, profile_score = moderate_content(intro)
+
+    # Step 2: Average Post Score
+    posts = query_db('SELECT content FROM posts WHERE user_id = ?', (user_id,))
+    post_total_score = 0.0
+    for p in posts:
+        _, score = moderate_content(p['content'])
+        post_total_score += score
+    average_post_score = (post_total_score / len(posts)) if posts else 0.0
+
+    # Step 3: Average Comment Score
+    comments = query_db('SELECT content FROM comments WHERE user_id = ?', (user_id,))
+    comment_total_score = 0.0
+    for c in comments:
+        _, score = moderate_content(c['content'])
+        comment_total_score += score
+    average_comment_score = (comment_total_score / len(comments)) if comments else 0.0
+
+    # Step 4: Combine Scores
+    content_risk_score = (profile_score * 1) + (average_post_score * 3) + (average_comment_score * 1)
+
+    # Step 5: Apply Age Multiplier
+    user_risk_score = content_risk_score
+    if user['created_at']:
+        dt = user['created_at']
+        if isinstance(dt, str):
+            try: dt = datetime.fromisoformat(dt)
+            except ValueError: pass
+        if isinstance(dt, datetime):
+            age_days = (datetime.utcnow() - dt).days
+            if age_days < 7:
+                user_risk_score *= 1.5
+            elif age_days < 30:
+                user_risk_score *= 1.2
+
+    # Step 6: Final Capping (Max 5.0)
+    return round(min(5.0, user_risk_score), 2)
     
 # Assignment 2.1
 def moderate_content(content):
-    """
-    Args
-        content: the text content of a post or comment to be moderated.
+    """Filters inappropriate words and calculates a severity score for a single piece of text."""
+    if not content:
+        return content, 0.0
         
-    Returns: 
-        A tuple containing the moderated content (string) and a severity score (float). There are no strict rules or bounds to the severity score, other than that a score of less than 1.0 means no risk, 1.0 to 3.0 is low risk, 3.0 to 5.0 is medium risk and above 5.0 is high risk.
+    # --- TEMPORARY TEST RULE ---
+    if "testbad" in content.lower():
+        return "[content removed due to severe violation]", 5.0
+    # ---------------------------
     
-    This function moderates a string of content and calculates a severity score based on
-    rules loaded from the 'censorship.dat' file. These are already loaded as TIER1_WORDS, TIER2_PHRASES and TIER3_WORDS. Tier 1 corresponds to strong profanity, Tier 2 to scam/spam phrases and Tier 3 to mild profanity.
-    
-    You will be able to check the scores by logging in with the administrator account:
-            username: admin
-            password: admin
-    Then, navigate to the /admin endpoint. (http://localhost:8080/admin)
-    """
-
+    # Stage 1.1: Severe Violation Checks
+    for word in TIER1_WORDS:
+        if re.search(rf'\b{re.escape(word)}\b', content, re.IGNORECASE):
+            return "[content removed due to severe violation]", 5.0
+            
+    for phrase in TIER2_PHRASES:
+        if re.search(rf'\b{re.escape(phrase)}\b', content, re.IGNORECASE):
+            return "[content removed due to spam/scam policy]", 5.0
+            
+    # Stage 1.2: Scored Violations & Filtering
+    score = 0.0
     moderated_content = content
-    score = 0
     
+    for word in TIER3_WORDS:
+        pattern = re.compile(rf'\b{re.escape(word)}\b', re.IGNORECASE)
+        matches = pattern.findall(moderated_content)
+        if matches:
+            score += (2.0 * len(matches))
+            moderated_content = pattern.sub('*' * len(word), moderated_content)
+            
+    url_pattern = re.compile(r'https?://[^\s]+|www\.[^\s]+')
+    url_matches = url_pattern.findall(moderated_content)
+    if url_matches:
+        score += (2.0 * len(url_matches))
+        moderated_content = url_pattern.sub('[link removed]', moderated_content)
+        
+    alpha_chars = [c for c in content if c.isalpha()]
+    if len(alpha_chars) > 15:
+        upper_chars = [c for c in alpha_chars if c.isupper()]
+        if (len(upper_chars) / len(alpha_chars)) > 0.70:
+            score += 0.5
+            
     return moderated_content, score
 
 # Coding Assignment #3
@@ -937,6 +1192,171 @@ def recommend(user_id, filter_following):
     recommended_posts = {} 
 
     return recommended_posts;
+
+# --- NEW CODE: Feature 3 (Design Claim 32 - Group Commitment) ---
+
+# 1. Initialize the new database tables safely
+with app.app_context():
+    db = get_db()
+    db.execute('CREATE TABLE IF NOT EXISTS user_groups (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, keyword TEXT, creator_id INTEGER)')
+    db.execute('CREATE TABLE IF NOT EXISTS group_members (group_id INTEGER, user_id INTEGER, PRIMARY KEY (group_id, user_id))')
+    db.commit()
+
+# 2. Route to list all groups and create new ones
+@app.route('/groups', methods=['GET', 'POST'])
+def groups():
+    if not session.get('user_id'):
+        return redirect(url_for('login'))
+        
+    if request.method == 'POST':
+        name = request.form['name']
+        keyword = request.form['keyword']
+        # Create the group
+        query_db('INSERT INTO user_groups (name, keyword, creator_id) VALUES (?, ?, ?)', 
+                 (name, keyword, session['user_id']), commit=True)
+        # Add the creator to the group automatically
+        new_group = query_db('SELECT id FROM user_groups ORDER BY id DESC LIMIT 1', one=True)
+        query_db('INSERT INTO group_members (group_id, user_id) VALUES (?, ?)', 
+                 (new_group['id'], session['user_id']), commit=True)
+        return redirect(url_for('groups'))
+        
+    all_groups = query_db('SELECT * FROM user_groups')
+    
+    # NEW CODE: Fetch the groups the current user is a member of
+    my_groups = query_db('''
+        SELECT g.* FROM user_groups g 
+        JOIN group_members gm ON g.id = gm.group_id 
+        WHERE gm.user_id = ?
+    ''', (session['user_id'],))
+    
+    return render_template('groups.html.j2', groups=all_groups, my_groups=my_groups)
+
+# 3. Route to view a specific group and see member suggestions
+@app.route('/groups/<int:group_id>')
+def group_detail(group_id):
+    if not session.get('user_id'):
+        return redirect(url_for('login'))
+        
+    group = query_db('SELECT * FROM user_groups WHERE id = ?', (group_id,), one=True)
+    if not group:
+        abort(404)
+        
+    members = query_db('''
+        SELECT u.username FROM users u 
+        JOIN group_members gm ON u.id = gm.user_id 
+        WHERE gm.group_id = ?
+    ''', (group_id,))
+    
+    # --- DESIGN CLAIM 32: Group Commitment ---
+    # Find users whose past posts contain the group's keyword.
+    # If they talked about it, they might want to join the group
+    keyword_search = f"%{group['keyword']}%"
+    suggestions = query_db('''
+        SELECT DISTINCT u.id, u.username 
+        FROM users u 
+        JOIN posts p ON u.id = p.user_id 
+        WHERE p.content LIKE ? 
+        AND u.id NOT IN (SELECT user_id FROM group_members WHERE group_id = ?)
+    ''', (keyword_search, group_id))
+    
+    # NEW: Check if the current logged-in user is already a member
+    current_user_id = session.get('user_id')
+    is_member = query_db('SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ?', 
+                         (group_id, current_user_id), one=True)
+    
+    return render_template('group_detail.html.j2', group=group, members=members, 
+                           suggestions=suggestions, is_member=bool(is_member))
+
+# 4. Route to add a suggested member to the group
+@app.route('/groups/<int:group_id>/add_member', methods=['POST'])
+def add_group_member(group_id):
+    user_id = request.form.get('user_id')
+    try:
+        query_db('INSERT INTO group_members (group_id, user_id) VALUES (?, ?)', (group_id, user_id), commit=True)
+    except sqlite3.IntegrityError:
+        pass # Already a member
+    return redirect(url_for('group_detail', group_id=group_id))
+
+# 5. Route to leave a group
+@app.route('/groups/<int:group_id>/leave', methods=['POST'])
+def leave_group(group_id):
+    if not session.get('user_id'):
+        return redirect(url_for('login'))
+        
+    query_db('DELETE FROM group_members WHERE group_id = ? AND user_id = ?', 
+             (group_id, session['user_id']), commit=True)
+    return redirect(url_for('group_detail', group_id=group_id))
+
+# 6. Route to delete a group (Creator only)
+@app.route('/groups/<int:group_id>/delete', methods=['POST'])
+def delete_group(group_id):
+    if not session.get('user_id'):
+        return redirect(url_for('login'))
+        
+    group = query_db('SELECT creator_id FROM user_groups WHERE id = ?', (group_id,), one=True)
+    
+    # Only delete if the group exists and the current user is the creator
+    if group and group['creator_id'] == session['user_id']:
+        query_db('DELETE FROM user_groups WHERE id = ?', (group_id,), commit=True)
+        query_db('DELETE FROM group_members WHERE group_id = ?', (group_id,), commit=True)
+        
+    return redirect(url_for('groups'))
+
+# --------------------------------------------------------------
+# --- DESIGN CLAIM 39: Pre-post warning API ---
+@app.route('/api/check_content', methods=['POST'])
+def check_content_api():
+    """Receives text from the frontend, scores it, and returns the score."""
+    if not session.get('user_id'):
+        return {"score": 0, "moderated_text": ""}
+        
+    data = request.get_json()
+    content = data.get('content', '')
+    
+    # Run it through the moderation function we just built
+    moderated_text, score = moderate_content(content)
+    
+    return {"score": score, "moderated_text": moderated_text}
+
+def recommend(user_id, following_only=False):
+    """Returns 5 recommended posts based on followed users and positive reaction history."""
+    db = get_db()
+    query = '''
+        SELECT DISTINCT p.id, p.content, p.created_at, u.username, p.user_id
+        FROM posts p
+        JOIN users u ON p.user_id = u.id
+        WHERE p.user_id != ? 
+        AND (
+            p.user_id IN (SELECT followed_id FROM follows WHERE follower_id = ?)
+            OR p.user_id IN (
+                SELECT p2.user_id FROM posts p2
+                JOIN reactions r ON r.post_id = p2.id WHERE r.user_id = ? 
+            )
+        )
+        AND p.id NOT IN (SELECT post_id FROM reactions WHERE user_id = ?)
+        ORDER BY p.created_at DESC LIMIT 5
+    '''
+    posts_raw = db.execute(query, (user_id, user_id, user_id, user_id)).fetchall()
+    recommended_posts = []
+    for post in posts_raw:
+        post_dict = dict(post)
+        moderated_content, _ = moderate_content(post_dict['content'])
+        post_dict['content'] = moderated_content
+        recommended_posts.append(post_dict)
+    return recommended_posts
+
+
+@app.route('/sandbox', methods=['GET', 'POST'])
+def sandbox():
+    """Allows newcomers to test their posts against moderation rules safely."""
+    user_id = session.get('user_id')
+    if not user_id: return redirect(url_for('login'))
+    result = None
+    if request.method == 'POST':
+        test_content = request.form.get('content')
+        moderated_text, score = moderate_content(test_content)
+        result = {'original': test_content, 'moderated': moderated_text, 'score': score}
+    return render_template('sandbox.html.j2', result=result)
 
 if __name__ == '__main__':
     app.run(debug=True, port=8080)

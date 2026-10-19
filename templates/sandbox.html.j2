@@ -1,0 +1,17 @@
+{% extends 'base.html.j2' %}
+{% block content %}
+<h2>Newcomer Sandbox: Practice Your Posts!</h2>
+<p>Test your content here to see how our moderation system scores it. Posts here are <b>NOT</b> saved to the public feed.</p>
+
+<form method="POST">
+    <textarea name="content" rows="4" style="width: 100%;" placeholder="Type a practice post here..."></textarea><br><br>
+    <button type="submit" class="btn btn-primary">Test Moderation Rules</button>
+</form>
+
+{% if result %}
+    <hr>
+    <h3>Results:</h3>
+    <p><strong>Risk Score it would receive:</strong> {{ result.score }}</p>
+    <p><strong>How it would look on the feed:</strong> {{ result.moderated }}</p>
+{% endif %}
+{% endblock %}

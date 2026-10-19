@@ -1,0 +1,51 @@
+{% extends "base.html.j2" %}
+{% block content %}
+<div class="col-md-8 mx-auto">
+  <h2 class="text-center border-bottom pb-2 mb-4">Groups</h2>
+
+  <!-- Create Group Form -->
+  <div class="card mb-4 shadow-sm">
+    <div class="card-body">
+      <h5 class="card-title">Create a New Interest Group</h5>
+      <form action="{{ url_for('groups') }}" method="POST">
+        <div class="mb-3">
+          <label class="form-label">Group Name</label>
+          <input type="text" class="form-control" name="name" required placeholder="e.g., The Coffee Club">
+        </div>
+        <div class="mb-3">
+          <label class="form-label">Interest Keyword</label>
+          <input type="text" class="form-control" name="keyword" required placeholder="e.g., coffee">
+          <small class="text-muted">We will suggest members whose posts contain this keyword.</small>
+        </div>
+        <button type="submit" class="btn btn-primary float-end">Create Group</button>
+      </form>
+    </div>
+  </div>
+
+<!-- NEW CODE: My Groups -->
+  <h4 class="mt-5">My Groups</h4>
+  <div class="list-group mt-2 mb-4">
+    {% for group in my_groups %}
+      <a href="{{ url_for('group_detail', group_id=group.id) }}" class="list-group-item list-group-item-action list-group-item-success d-flex justify-content-between align-items-center">
+        <span><strong>{{ group.name }}</strong> (Keyword: {{ group.keyword }})</span>
+        <span class="badge bg-success rounded-pill">View</span>
+      </a>
+    {% else %}
+      <p class="text-muted">You haven't joined any groups yet.</p>
+    {% endfor %}
+  </div>
+
+  <!-- List All Groups -->
+  <h4>Explore All Groups</h4>
+  <div class="list-group mt-2">
+    {% for group in groups %}
+      <a href="{{ url_for('group_detail', group_id=group.id) }}" class="list-group-item list-group-item-action d-flex justify-content-between align-items-center">
+        <span><strong>{{ group.name }}</strong> (Keyword: {{ group.keyword }})</span>
+        <span class="badge bg-secondary rounded-pill">View</span>
+      </a>
+    {% else %}
+      <p class="text-muted">No groups created yet. Be the first!</p>
+    {% endfor %}
+  </div>
+</div>
+{% endblock %}
